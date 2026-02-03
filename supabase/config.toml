@@ -1,0 +1,4 @@
+project_id = "svxnlesbclpitdkhykpc"
+
+[functions.oracle-predict]
+verify_jwt = false
