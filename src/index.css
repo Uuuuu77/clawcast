@@ -2,7 +2,7 @@
 @tailwind components;
 @tailwind utilities;
 
-/* ORACLE AI - Dark Futuristic Design System */
+/* CLAWCAST - Evidence-Based Intelligence Design System */
 
 @layer base {
   :root {
@@ -41,11 +41,11 @@
 
     --radius: 0.75rem;
 
-    /* Custom Oracle colors */
-    --oracle-cyan: 180 100% 50%;
-    --oracle-purple: 270 80% 60%;
-    --oracle-space: 240 10% 4%;
-    --oracle-glow: 180 100% 70%;
+    /* ClawCast brand colors */
+    --clawcast-cyan: 180 100% 50%;
+    --clawcast-purple: 270 80% 60%;
+    --clawcast-space: 240 10% 4%;
+    --clawcast-glow: 180 100% 70%;
 
     /* Sidebar */
     --sidebar-background: 240 10% 5%;
