@@ -5,6 +5,74 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version',
 };
 
+// Input validation constants
+const MIN_QUERY_LENGTH = 5;
+const MAX_QUERY_LENGTH = 500;
+
+// Validate and sanitize user query input
+function validateQuery(query: unknown): { valid: true; sanitized: string } | { valid: false; error: string } {
+  if (!query || typeof query !== 'string') {
+    return { valid: false, error: 'Query is required and must be a string' };
+  }
+
+  const trimmed = query.trim();
+
+  if (trimmed.length < MIN_QUERY_LENGTH) {
+    return { valid: false, error: `Query must be at least ${MIN_QUERY_LENGTH} characters` };
+  }
+
+  if (trimmed.length > MAX_QUERY_LENGTH) {
+    return { valid: false, error: `Query must not exceed ${MAX_QUERY_LENGTH} characters` };
+  }
+
+  // Sanitize: remove potential prompt injection patterns and dangerous characters
+  const sanitized = trimmed
+    .replace(/[<>"'`]/g, '') // Remove HTML/script-like chars
+    .replace(/\b(ignore|disregard)\s+(previous|above|all|instructions)/gi, '') // Remove injection attempts
+    .replace(/[\x00-\x1F\x7F]/g, '') // Remove control characters
+    .trim();
+
+  if (sanitized.length < MIN_QUERY_LENGTH) {
+    return { valid: false, error: 'Query contains too many invalid characters' };
+  }
+
+  return { valid: true, sanitized };
+}
+
+// Map internal errors to safe client-facing messages
+function getSafeErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    const msg = error.message.toLowerCase();
+    
+    if (msg.includes('api_key') || msg.includes('apikey') || msg.includes('configured')) {
+      return 'Service temporarily unavailable. Please try again later.';
+    }
+    if (msg.includes('rate limit')) {
+      return 'Too many requests. Please try again in a moment.';
+    }
+    if (msg.includes('usage limit') || msg.includes('credits')) {
+      return 'Service capacity reached. Please try again later.';
+    }
+    if (msg.includes('timeout') || msg.includes('timed out')) {
+      return 'Request timed out. Please try again.';
+    }
+  }
+  return 'Analysis request failed. Please try again.';
+}
+
+// Structured error logging for server-side debugging
+function logError(context: string, error: unknown, metadata?: Record<string, unknown>) {
+  console.error(JSON.stringify({
+    timestamp: new Date().toISOString(),
+    context,
+    error: error instanceof Error ? {
+      message: error.message,
+      name: error.name,
+    } : String(error),
+    metadata
+  }));
+}
+
 interface EvidenceItem {
   id: string;
   source: string;
@@ -280,16 +348,19 @@ Synthesize this evidence into an assessment. Remember:
 
   if (!response.ok) {
     const errorText = await response.text();
-    console.error('AI Gateway error:', response.status, errorText);
+    logError('AI Gateway request failed', new Error(`Status ${response.status}`), { 
+      status: response.status,
+      responsePreview: errorText.substring(0, 200) 
+    });
     
     if (response.status === 429) {
-      throw new Error('Rate limit exceeded. Please try again in a moment.');
+      throw new Error('Rate limit exceeded');
     }
     if (response.status === 402) {
-      throw new Error('Usage limit reached. Please add credits to continue.');
+      throw new Error('Usage limit reached');
     }
     
-    throw new Error(`AI analysis failed: ${response.status}`);
+    throw new Error('AI synthesis failed');
   }
 
   const aiResponse = await response.json();
@@ -334,14 +405,37 @@ serve(async (req) => {
   }
 
   try {
-    const { query } = await req.json();
-
-    if (!query || typeof query !== 'string') {
+    // Validate content-type header
+    const contentType = req.headers.get('content-type');
+    if (!contentType || !contentType.includes('application/json')) {
       return new Response(
-        JSON.stringify({ error: 'Query is required' }),
+        JSON.stringify({ error: 'Content-Type must be application/json' }),
+        { status: 415, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    let body: unknown;
+    try {
+      body = await req.json();
+    } catch {
+      return new Response(
+        JSON.stringify({ error: 'Invalid JSON in request body' }),
         { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
+
+    // Validate and sanitize query input
+    const queryInput = (body as Record<string, unknown>)?.query;
+    const validation = validateQuery(queryInput);
+    
+    if (!validation.valid) {
+      return new Response(
+        JSON.stringify({ error: validation.error }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    const query = validation.sanitized;
 
     const LOVABLE_API_KEY = Deno.env.get('LOVABLE_API_KEY');
     if (!LOVABLE_API_KEY) {
@@ -399,11 +493,10 @@ serve(async (req) => {
     );
 
   } catch (error) {
-    console.error('ClawCast analysis error:', error);
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    logError('ClawCast analysis error', error);
     
     return new Response(
-      JSON.stringify({ error: errorMessage }),
+      JSON.stringify({ error: getSafeErrorMessage(error) }),
       { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );
   }
