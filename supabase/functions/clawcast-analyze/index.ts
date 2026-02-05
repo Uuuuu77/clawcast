@@ -8,6 +8,8 @@ const corsHeaders = {
 // Input validation constants
 const MIN_QUERY_LENGTH = 5;
 const MAX_QUERY_LENGTH = 500;
+const DEFAULT_TIMEOUT_MS = 15000;
+const MAX_RETRIES = 2;
 
 // Validate and sanitize user query input
 function validateQuery(query: unknown): { valid: true; sanitized: string } | { valid: false; error: string } {
@@ -73,6 +75,111 @@ function logError(context: string, error: unknown, metadata?: Record<string, unk
   }));
 }
 
+// Fetch with timeout protection
+async function fetchWithTimeout(
+  url: string, 
+  options: RequestInit, 
+  timeoutMs: number = DEFAULT_TIMEOUT_MS
+): Promise<Response | null> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    return response;
+  } catch (error) {
+    clearTimeout(timeoutId);
+    if (error instanceof Error && error.name === 'AbortError') {
+      console.warn(`Request timed out after ${timeoutMs}ms: ${url}`);
+      return null;
+    }
+    throw error;
+  }
+}
+
+// Fetch with retry logic and exponential backoff
+async function fetchWithRetry(
+  url: string,
+  options: RequestInit,
+  maxRetries: number = MAX_RETRIES,
+  timeoutMs: number = DEFAULT_TIMEOUT_MS
+): Promise<Response | null> {
+  let lastError: Error | null = null;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const response = await fetchWithTimeout(url, options, timeoutMs);
+      
+      if (!response) {
+        // Timeout - retry
+        lastError = new Error('Request timed out');
+        if (attempt < maxRetries) {
+          const delay = Math.pow(2, attempt) * 1000; // 1s, 2s
+          console.log(`Retry ${attempt + 1}/${maxRetries} after ${delay}ms for: ${url}`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+          continue;
+        }
+        return null;
+      }
+
+      // Don't retry on client errors (4xx), only server errors (5xx)
+      if (response.status >= 500) {
+        lastError = new Error(`Server error: ${response.status}`);
+        if (attempt < maxRetries) {
+          const delay = Math.pow(2, attempt) * 1000;
+          console.log(`Retry ${attempt + 1}/${maxRetries} after ${delay}ms due to ${response.status}`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+          continue;
+        }
+      }
+
+      return response;
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+      if (attempt < maxRetries) {
+        const delay = Math.pow(2, attempt) * 1000;
+        console.log(`Retry ${attempt + 1}/${maxRetries} after ${delay}ms due to error: ${lastError.message}`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
+  }
+
+  console.error(`All ${maxRetries + 1} attempts failed for: ${url}`, lastError);
+  return null;
+}
+
+// Extract key terms from query for relevance filtering
+function extractQueryTerms(query: string): string[] {
+  const stopWords = new Set(['will', 'the', 'a', 'an', 'be', 'is', 'are', 'was', 'were', 'been', 'being', 
+    'have', 'has', 'had', 'do', 'does', 'did', 'could', 'would', 'should', 'may', 'might', 'must',
+    'to', 'of', 'in', 'for', 'on', 'with', 'at', 'by', 'from', 'as', 'into', 'through', 'during',
+    'before', 'after', 'above', 'below', 'between', 'under', 'again', 'further', 'then', 'once',
+    'here', 'there', 'when', 'where', 'why', 'how', 'all', 'each', 'few', 'more', 'most', 'other',
+    'some', 'such', 'no', 'nor', 'not', 'only', 'own', 'same', 'so', 'than', 'too', 'very', 'can',
+    'just', 'now', 'or', 'and', 'but', 'if', 'because', 'about', 'this', 'that', 'what', 'which',
+    'who', 'whom', 'these', 'those', 'reach', 'happen', 'occur', 'get', 'go', 'come', 'make', 'take']);
+  
+  return query.toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter(word => word.length > 2 && !stopWords.has(word));
+}
+
+// Check if a market is relevant to the query
+function isRelevantMarket(marketQuestion: string, queryTerms: string[]): boolean {
+  if (queryTerms.length === 0) return true;
+  
+  const marketLower = marketQuestion.toLowerCase();
+  const matchCount = queryTerms.filter(term => marketLower.includes(term)).length;
+  
+  // Require at least 40% of query terms to match
+  return matchCount >= Math.max(1, Math.floor(queryTerms.length * 0.4));
+}
+
 interface EvidenceItem {
   id: string;
   source: string;
@@ -96,23 +203,34 @@ async function gatherWebEvidence(query: string, apiKey: string): Promise<Evidenc
   try {
     console.log('Searching web for:', query);
     
-    const response = await fetch('https://api.firecrawl.dev/v1/search', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        query: query,
-        limit: 5,
-        scrapeOptions: {
-          formats: ['markdown'],
+    const response = await fetchWithRetry(
+      'https://api.firecrawl.dev/v1/search',
+      {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
         },
-      }),
-    });
+        body: JSON.stringify({
+          query: query,
+          limit: 5,
+          scrapeOptions: {
+            formats: ['markdown'],
+          },
+        }),
+      },
+      MAX_RETRIES,
+      DEFAULT_TIMEOUT_MS
+    );
+
+    if (!response) {
+      console.warn('Firecrawl search timed out or failed after retries');
+      return evidence;
+    }
 
     if (!response.ok) {
-      console.error('Firecrawl search failed:', response.status);
+      const errorText = await response.text().catch(() => 'Unknown error');
+      console.error('Firecrawl search failed:', response.status, errorText.substring(0, 200));
       return evidence;
     }
 
@@ -125,13 +243,15 @@ async function gatherWebEvidence(query: string, apiKey: string): Promise<Evidenc
         if (result.markdown) {
           // Get first meaningful paragraph
           const paragraphs = result.markdown.split('\n\n').filter((p: string) => 
-            p.length > 50 && !p.startsWith('#') && !p.startsWith('!')
+            p.length > 50 && !p.startsWith('#') && !p.startsWith('!') && !p.startsWith('[')
           );
           if (paragraphs.length > 0) {
-            quote = paragraphs[0].slice(0, 300);
+            quote = paragraphs[0].replace(/\[([^\]]+)\]\([^)]+\)/g, '$1').slice(0, 300); // Remove markdown links
             if (paragraphs[0].length > 300) quote += '...';
           }
         }
+
+        if (quote.length < 20) continue; // Skip very short quotes
 
         evidence.push({
           id: crypto.randomUUID(),
@@ -145,7 +265,7 @@ async function gatherWebEvidence(query: string, apiKey: string): Promise<Evidenc
       }
     }
   } catch (error) {
-    console.error('Error gathering web evidence:', error);
+    logError('Error gathering web evidence', error);
   }
 
   return evidence;
@@ -155,30 +275,48 @@ async function gatherWebEvidence(query: string, apiKey: string): Promise<Evidenc
 async function gatherCryptoEvidence(query: string): Promise<EvidenceItem[]> {
   const evidence: EvidenceItem[] = [];
   
-  // Check if query mentions crypto terms
-  const cryptoTerms = ['bitcoin', 'btc', 'ethereum', 'eth', 'crypto', 'solana', 'sol', 'xrp'];
+  // Extended crypto terms mapping
+  const coinMap: Record<string, string> = {
+    'bitcoin': 'bitcoin', 'btc': 'bitcoin',
+    'ethereum': 'ethereum', 'eth': 'ethereum', 'ether': 'ethereum',
+    'solana': 'solana', 'sol': 'solana',
+    'xrp': 'ripple', 'ripple': 'ripple',
+    'cardano': 'cardano', 'ada': 'cardano',
+    'dogecoin': 'dogecoin', 'doge': 'dogecoin',
+    'polkadot': 'polkadot', 'dot': 'polkadot',
+    'polygon': 'matic-network', 'matic': 'matic-network',
+    'chainlink': 'chainlink', 'link': 'chainlink',
+    'avalanche': 'avalanche-2', 'avax': 'avalanche-2',
+    'litecoin': 'litecoin', 'ltc': 'litecoin',
+    'crypto': 'bitcoin', // Default to BTC for general crypto queries
+  };
+  
   const lowerQuery = query.toLowerCase();
-  const mentionedCrypto = cryptoTerms.find(term => lowerQuery.includes(term));
+  const mentionedCrypto = Object.keys(coinMap).find(term => lowerQuery.includes(term));
   
   if (!mentionedCrypto) return evidence;
 
+  const coinId = coinMap[mentionedCrypto];
+  
   try {
-    // Map common terms to CoinGecko IDs
-    const coinMap: Record<string, string> = {
-      'bitcoin': 'bitcoin', 'btc': 'bitcoin',
-      'ethereum': 'ethereum', 'eth': 'ethereum',
-      'solana': 'solana', 'sol': 'solana',
-      'xrp': 'ripple',
-      'crypto': 'bitcoin', // Default to BTC for general crypto queries
-    };
-    
-    const coinId = coinMap[mentionedCrypto] || 'bitcoin';
-    
     console.log('Fetching CoinGecko data for:', coinId);
     
-    const response = await fetch(
-      `https://api.coingecko.com/api/v3/coins/${coinId}?localization=false&tickers=false&community_data=false&developer_data=false`
+    const response = await fetchWithRetry(
+      `https://api.coingecko.com/api/v3/coins/${coinId}?localization=false&tickers=false&community_data=false&developer_data=false`,
+      { method: 'GET' },
+      1, // Only 1 retry for CoinGecko (rate limit sensitive)
+      10000 // 10s timeout
     );
+
+    if (!response) {
+      console.warn('CoinGecko request failed after retries');
+      return evidence;
+    }
+
+    if (response.status === 429) {
+      console.warn('CoinGecko rate limit hit');
+      return evidence;
+    }
 
     if (!response.ok) {
       console.error('CoinGecko API failed:', response.status);
@@ -193,6 +331,11 @@ async function gatherCryptoEvidence(query: string): Promise<EvidenceItem[]> {
     const change30d = data.market_data?.price_change_percentage_30d;
     const marketCap = data.market_data?.market_cap?.usd;
 
+    if (!price) {
+      console.warn('CoinGecko returned no price data for:', coinId);
+      return evidence;
+    }
+
     const formatNumber = (num: number) => {
       if (num >= 1e12) return `$${(num / 1e12).toFixed(2)}T`;
       if (num >= 1e9) return `$${(num / 1e9).toFixed(2)}B`;
@@ -200,7 +343,8 @@ async function gatherCryptoEvidence(query: string): Promise<EvidenceItem[]> {
       return `$${num.toLocaleString()}`;
     };
 
-    const formatChange = (num: number) => {
+    const formatChange = (num: number | null | undefined) => {
+      if (num == null) return 'N/A';
       const sign = num >= 0 ? '+' : '';
       return `${sign}${num.toFixed(2)}%`;
     };
@@ -215,7 +359,7 @@ async function gatherCryptoEvidence(query: string): Promise<EvidenceItem[]> {
       relevanceScore: 0.9,
     });
   } catch (error) {
-    console.error('Error gathering crypto evidence:', error);
+    logError('Error gathering crypto evidence', error);
   }
 
   return evidence;
@@ -225,14 +369,23 @@ async function gatherCryptoEvidence(query: string): Promise<EvidenceItem[]> {
 async function gatherPredictionMarketEvidence(query: string): Promise<{ evidence: EvidenceItem[], marketOdds: MarketOdds[] }> {
   const evidence: EvidenceItem[] = [];
   const marketOdds: MarketOdds[] = [];
+  const queryTerms = extractQueryTerms(query);
 
   try {
     console.log('Searching Polymarket for:', query);
     
     // Polymarket gamma API for searching markets
-    const response = await fetch(
-      `https://gamma-api.polymarket.com/markets?closed=false&limit=3&search=${encodeURIComponent(query)}`
+    const response = await fetchWithRetry(
+      `https://gamma-api.polymarket.com/markets?closed=false&limit=10&search=${encodeURIComponent(query)}`,
+      { method: 'GET' },
+      1, // 1 retry
+      10000 // 10s timeout
     );
+
+    if (!response) {
+      console.warn('Polymarket request failed after retries');
+      return { evidence, marketOdds };
+    }
 
     if (!response.ok) {
       console.error('Polymarket API failed:', response.status);
@@ -242,12 +395,31 @@ async function gatherPredictionMarketEvidence(query: string): Promise<{ evidence
     const markets = await response.json();
 
     if (Array.isArray(markets) && markets.length > 0) {
-      for (const market of markets) {
-        const yesPrice = market.outcomePrices ? 
-          JSON.parse(market.outcomePrices)[0] : null;
+      // Filter to only relevant markets
+      const relevantMarkets = markets.filter((market: { question?: string }) => 
+        market.question && isRelevantMarket(market.question, queryTerms)
+      );
+
+      console.log(`Found ${markets.length} markets, ${relevantMarkets.length} relevant`);
+
+      for (const market of relevantMarkets.slice(0, 3)) { // Max 3 relevant markets
+        // Safely parse outcomePrices
+        let yesPrice: number | null = null;
+        if (market.outcomePrices) {
+          try {
+            const prices = typeof market.outcomePrices === 'string' 
+              ? JSON.parse(market.outcomePrices) 
+              : market.outcomePrices;
+            if (Array.isArray(prices) && prices.length > 0) {
+              yesPrice = parseFloat(prices[0]);
+            }
+          } catch (e) {
+            console.warn('Failed to parse outcomePrices:', market.outcomePrices);
+          }
+        }
         
-        if (yesPrice) {
-          const percentage = (parseFloat(yesPrice) * 100).toFixed(0);
+        if (yesPrice != null && !isNaN(yesPrice)) {
+          const percentage = (yesPrice * 100).toFixed(0);
           
           marketOdds.push({
             platform: 'Polymarket',
@@ -268,7 +440,7 @@ async function gatherPredictionMarketEvidence(query: string): Promise<{ evidence
       }
     }
   } catch (error) {
-    console.error('Error gathering prediction market evidence:', error);
+    logError('Error gathering prediction market evidence', error);
   }
 
   return { evidence, marketOdds };
@@ -330,24 +502,33 @@ Synthesize this evidence into an assessment. Remember:
 
   console.log('Synthesizing with AI...');
 
-  const response = await fetch('https://ai.gateway.lovable.dev/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${lovableApiKey}`,
-      'Content-Type': 'application/json',
+  const response = await fetchWithRetry(
+    'https://ai.gateway.lovable.dev/v1/chat/completions',
+    {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${lovableApiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'google/gemini-3-flash-preview',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt }
+        ],
+        temperature: 0.4, // Slightly higher for better synthesis
+      }),
     },
-    body: JSON.stringify({
-      model: 'google/gemini-3-flash-preview',
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt }
-      ],
-      temperature: 0.3, // Lower for more consistent output
-    }),
-  });
+    MAX_RETRIES,
+    30000 // 30s timeout for AI
+  );
+
+  if (!response) {
+    throw new Error('AI synthesis timed out');
+  }
 
   if (!response.ok) {
-    const errorText = await response.text();
+    const errorText = await response.text().catch(() => 'Unknown error');
     logError('AI Gateway request failed', new Error(`Status ${response.status}`), { 
       status: response.status,
       responsePreview: errorText.substring(0, 200) 
@@ -400,6 +581,13 @@ Synthesize this evidence into an assessment. Remember:
 }
 
 serve(async (req) => {
+  // Log startup info
+  console.log('🦞 ClawCast Edge Function Started', {
+    timestamp: new Date().toISOString(),
+    hasLovableKey: !!Deno.env.get('LOVABLE_API_KEY'),
+    hasFirecrawlKey: !!Deno.env.get('FIRECRAWL_API_KEY'),
+  });
+
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
   }
@@ -449,19 +637,19 @@ serve(async (req) => {
 
     console.log('Processing ClawCast query:', query);
 
-    // Gather evidence in parallel
+    // Gather evidence in parallel with individual timeouts
     const [webEvidence, cryptoEvidence, predictionData] = await Promise.all([
       gatherWebEvidence(query, FIRECRAWL_API_KEY),
       gatherCryptoEvidence(query),
       gatherPredictionMarketEvidence(query),
     ]);
 
-    // Combine all evidence
+    // Combine all evidence (limit to 10 most relevant)
     const allEvidence = [
-      ...webEvidence,
-      ...cryptoEvidence,
-      ...predictionData.evidence,
-    ];
+      ...predictionData.evidence, // Prediction markets first (highest relevance)
+      ...cryptoEvidence,          // Market data second
+      ...webEvidence,             // Web sources last
+    ].slice(0, 10);
 
     console.log(`Gathered ${allEvidence.length} evidence items`);
 
@@ -496,7 +684,10 @@ serve(async (req) => {
     logError('ClawCast analysis error', error);
     
     return new Response(
-      JSON.stringify({ error: getSafeErrorMessage(error) }),
+      JSON.stringify({ 
+        error: getSafeErrorMessage(error),
+        requestId: crypto.randomUUID(),
+      }),
       { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );
   }
