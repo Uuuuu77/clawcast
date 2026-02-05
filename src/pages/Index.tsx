@@ -6,12 +6,12 @@ import { LoadingAnimation } from "@/components/clawcast/LoadingAnimation";
 import { DisclaimerFooter } from "@/components/clawcast/DisclaimerFooter";
 import { useClawcastAnalysis } from "@/hooks/useClawcastAnalysis";
 import { useToast } from "@/hooks/use-toast";
-import { Sparkles, ArrowLeft } from "lucide-react";
+import { Sparkles, ArrowLeft, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 const Index = () => {
   const [result, setResult] = useState<AnalysisResult | null>(null);
-  const { analyze, isLoading, loadingStep } = useClawcastAnalysis();
+  const { analyze, retry, getLastQuery, isLoading, loadingStep } = useClawcastAnalysis();
   const { toast } = useToast();
 
   const handleAnalyze = async (query: string) => {
@@ -19,8 +19,35 @@ const Index = () => {
       const analysisResult = await analyze(query);
       setResult(analysisResult);
     } catch (error) {
+      const lastQuery = getLastQuery();
       toast({
         title: "Analysis Failed",
+        description: error instanceof Error ? error.message : "Unable to analyze. Please try again.",
+        variant: "destructive",
+        action: lastQuery ? (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleRetry}
+            className="gap-1"
+          >
+            <RefreshCw className="h-3 w-3" />
+            Retry
+          </Button>
+        ) : undefined,
+      });
+    }
+  };
+
+  const handleRetry = async () => {
+    try {
+      const analysisResult = await retry();
+      if (analysisResult) {
+        setResult(analysisResult);
+      }
+    } catch (error) {
+      toast({
+        title: "Retry Failed",
         description: error instanceof Error ? error.message : "Unable to analyze. Please try again.",
         variant: "destructive",
       });

@@ -1,3 +1,4 @@
+import { useState, useEffect } from "react";
 import { motion } from "framer-motion";
 import { Search, Database, Brain, FileCheck } from "lucide-react";
 
@@ -13,10 +14,28 @@ interface LoadingAnimationProps {
 }
 
 export function LoadingAnimation({ currentStep = 0 }: LoadingAnimationProps) {
+  const [elapsedTime, setElapsedTime] = useState(0);
+
+  useEffect(() => {
+    const startTime = Date.now();
+    const interval = setInterval(() => {
+      setElapsedTime(Math.floor((Date.now() - startTime) / 1000));
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, []);
+
+  const formatTime = (seconds: number) => {
+    if (seconds < 60) return `${seconds}s`;
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins}m ${secs}s`;
+  };
+
   return (
     <div className="w-full max-w-md mx-auto py-12 space-y-8">
       {/* Main animation */}
-      <div className="flex justify-center">
+      <div className="flex flex-col items-center gap-4">
         <motion.div
           className="w-24 h-24 rounded-full bg-gradient-to-br from-primary/20 to-secondary/20 flex items-center justify-center"
           animate={{
@@ -43,6 +62,11 @@ export function LoadingAnimation({ currentStep = 0 }: LoadingAnimationProps) {
             <Brain className="w-8 h-8 text-primary" />
           </motion.div>
         </motion.div>
+
+        {/* Elapsed time */}
+        <span className="text-sm text-muted-foreground">
+          Elapsed: {formatTime(elapsedTime)}
+        </span>
       </div>
 
       {/* Steps */}
@@ -51,6 +75,7 @@ export function LoadingAnimation({ currentStep = 0 }: LoadingAnimationProps) {
           const Icon = step.icon;
           const isActive = idx <= currentStep;
           const isCurrent = idx === currentStep;
+          const isComplete = idx < currentStep;
 
           return (
             <motion.div
@@ -66,16 +91,16 @@ export function LoadingAnimation({ currentStep = 0 }: LoadingAnimationProps) {
               }`}
             >
               <div className={`p-2 rounded-full ${
-                isActive ? "bg-primary/20" : "bg-muted/50"
+                isComplete ? "bg-green-500/20" : isActive ? "bg-primary/20" : "bg-muted/50"
               }`}>
                 <Icon className={`h-4 w-4 ${
-                  isActive ? "text-primary" : "text-muted-foreground"
+                  isComplete ? "text-green-500" : isActive ? "text-primary" : "text-muted-foreground"
                 }`} />
               </div>
               <span className={`text-sm ${
-                isActive ? "text-foreground" : "text-muted-foreground"
+                isComplete ? "text-green-500" : isActive ? "text-foreground" : "text-muted-foreground"
               }`}>
-                {step.label}
+                {isComplete ? step.label.replace('...', ' ✓') : step.label}
               </span>
               {isCurrent && (
                 <motion.div
@@ -103,6 +128,11 @@ export function LoadingAnimation({ currentStep = 0 }: LoadingAnimationProps) {
           );
         })}
       </div>
+
+      {/* Status message */}
+      <p className="text-center text-xs text-muted-foreground">
+        Gathering evidence from multiple sources...
+      </p>
     </div>
   );
 }
