@@ -56,6 +56,16 @@
     --sidebar-accent-foreground: 180 100% 95%;
     --sidebar-border: 180 30% 15%;
     --sidebar-ring: 180 100% 50%;
+
+    /* Chat message colors */
+    --message-user-bg: 240 8% 12%;
+    --message-assistant-bg: 240 10% 6%;
+
+    /* Evidence type colors */
+    --evidence-news: 210 100% 60%;
+    --evidence-market: 160 100% 45%;
+    --evidence-prediction: 280 80% 60%;
+    --evidence-analysis: 35 100% 55%;
   }
 
   .dark {
