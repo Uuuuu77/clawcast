@@ -11,6 +11,36 @@ const MAX_QUERY_LENGTH = 500;
 const DEFAULT_TIMEOUT_MS = 15000;
 const MAX_RETRIES = 2;
 
+// In-memory rate limiting (per edge function instance)
+const RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000; // 1 hour
+const RATE_LIMIT_MAX_REQUESTS = 20; // max requests per IP per hour
+
+const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
+
+function checkRateLimit(clientIp: string): { allowed: boolean; remaining: number } {
+  const now = Date.now();
+  const entry = rateLimitMap.get(clientIp);
+
+  // Clean up expired entries periodically
+  if (rateLimitMap.size > 1000) {
+    for (const [key, val] of rateLimitMap) {
+      if (val.resetAt <= now) rateLimitMap.delete(key);
+    }
+  }
+
+  if (!entry || entry.resetAt <= now) {
+    rateLimitMap.set(clientIp, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS });
+    return { allowed: true, remaining: RATE_LIMIT_MAX_REQUESTS - 1 };
+  }
+
+  if (entry.count >= RATE_LIMIT_MAX_REQUESTS) {
+    return { allowed: false, remaining: 0 };
+  }
+
+  entry.count++;
+  return { allowed: true, remaining: RATE_LIMIT_MAX_REQUESTS - entry.count };
+}
+
 // Validate and sanitize user query input
 function validateQuery(query: unknown): { valid: true; sanitized: string } | { valid: false; error: string } {
   if (!query || typeof query !== 'string') {
@@ -598,6 +628,27 @@ serve(async (req) => {
 
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
+  }
+
+  // Rate limiting by client IP
+  const clientIp = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() 
+    || req.headers.get('cf-connecting-ip') 
+    || 'unknown';
+  const rateCheck = checkRateLimit(clientIp);
+  
+  if (!rateCheck.allowed) {
+    console.warn(`Rate limit exceeded for IP: ${clientIp}`);
+    return new Response(
+      JSON.stringify({ error: 'Too many requests. Please try again later.' }),
+      { 
+        status: 429, 
+        headers: { 
+          ...corsHeaders, 
+          'Content-Type': 'application/json',
+          'Retry-After': '3600',
+        } 
+      }
+    );
   }
 
   try {
