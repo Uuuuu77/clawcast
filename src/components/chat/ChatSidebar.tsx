@@ -102,7 +102,7 @@ export function ChatSidebar() {
 
       {/* Disclaimer at bottom */}
       <div className="p-3 border-t border-border/30">
-        <DisclaimerFooter />
+        <DisclaimerFooter compact />
       </div>
     </div>
   );

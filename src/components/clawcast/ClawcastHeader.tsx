@@ -1,5 +1,6 @@
 import { Sparkles, Menu, PanelLeftClose, PanelLeft, Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { ThemeToggle } from "@/components/ThemeToggle";
 import { useChatStore } from "@/stores/chatStore";
 import { useIsMobile } from "@/hooks/use-mobile";
 
@@ -53,6 +54,8 @@ export function ClawcastHeader() {
 
           {/* Right: New Chat + badge */}
           <div className="flex items-center gap-2">
+            <ThemeToggle />
+
             <Button
               variant="outline"
               size="sm"
